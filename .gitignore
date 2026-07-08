@@ -1,0 +1,14 @@
+# Environment files (API keys, secrets)
+.env
+.env.*
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# CK code search index
+.ck/
+
+# macOS
+.DS_Store

@@ -2,7 +2,7 @@
 """Waybar module for Codex usage with independent per-bar coloring.
 
 5hr bar: colored by remaining %.
-Weekly bar: colored by scaled consumption -- compares used% vs time-elapsed%
+Weekly bar: colored by scaled consumption — compares used% vs time-elapsed%
 through the week so "ahead of schedule" and "behind schedule" differ even
 at the same remaining %.
 """
@@ -30,12 +30,12 @@ def color_weekly_scaled(used_pct: float, elapsed_pct: float) -> str:
     """Color the weekly bar by comparing consumption rate vs time elapsed.
 
     `adjusted = elapsed_pct - used_pct`:
-      positive -> more time elapsed than budget used (ahead of schedule)
-      negative -> more budget used than time elapsed (behind schedule)
+      positive → more time elapsed than budget used (ahead of schedule)
+      negative → more budget used than time elapsed (behind schedule)
     """
     remaining = 100 - used_pct
 
-    # Absolute exhaustion guard -- red regardless of schedule
+    # Absolute exhaustion guard — red regardless of schedule
     if remaining <= 10:
         return "#f23645"
 
@@ -77,7 +77,7 @@ secondary = usage["secondary"]
 
 primary_remaining = 100 - primary["usedPercent"]
 secondary_remaining = 100 - secondary["usedPercent"]
-
+primary_elapsed_pct = compute_elapsed_pct(primary["resetsAt"], primary["windowMinutes"])
 # Weekly time scaling
 elapsed_pct = compute_elapsed_pct(secondary["resetsAt"], secondary["windowMinutes"])
 
@@ -87,7 +87,7 @@ secondary_color = color_weekly_scaled(secondary["usedPercent"], elapsed_pct)
 primary_bar = make_bar(primary_remaining)
 secondary_bar = make_bar(secondary_remaining)
 
-# Module class -- used for blink animation only when truly critical
+# Module class — used for blink animation only when truly critical
 # (spans handle per-bar colors independently)
 if primary_remaining <= 5:
     css_class = "critical"
@@ -96,12 +96,12 @@ elif primary_remaining <= 20:
 else:
     css_class = ""
 
-primary_tooltip = f"5hr window: {primary_remaining}% remaining -- resets {primary['resetDescription']}"
+primary_tooltip = f"5hr window: {primary_remaining}% remaining ({primary_elapsed_pct:.0f}% of 5hr elapsed) — resets {primary['resetDescription']}"
 
 if secondary_remaining < 0:
-    secondary_tooltip = f"Weekly: exceeded by {-secondary_remaining}% -- resets {secondary['resetDescription']}"
+    secondary_tooltip = f"Weekly: exceeded by {-secondary_remaining}% — resets {secondary['resetDescription']}"
 else:
-    secondary_tooltip = f"Weekly: {secondary_remaining}% remaining ({elapsed_pct:.0f}% of week elapsed) -- resets {secondary['resetDescription']}"
+    secondary_tooltip = f"Weekly: {secondary_remaining}% remaining ({elapsed_pct:.0f}% of week elapsed) — resets {secondary['resetDescription']}"
 
 tooltip = f"{primary_tooltip}\n{secondary_tooltip}"
 

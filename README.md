@@ -8,7 +8,7 @@ Custom waybar modules for monitoring AI API usage: **Codex** (5hr/weekly quota) 
 
 Displays your Codex 5-hour and weekly usage windows as block bars with independent, time-aware coloring.
 
-**Dependency**: [codexbar](https://github.com/B00merang/CodexBar) CLI (`codexbar usage --json-only --source cli`)
+**Dependency**: Python 3 stdlib only (no pip packages). Reads auth from `~/.codex/auth.json` and calls the ChatGPT API directly.
 
 **How it colors each bar**:
 
@@ -20,18 +20,15 @@ Displays your Codex 5-hour and weekly usage windows as block bars with independe
 The module CSS class (`critical`/`warning`/`""`) only controls the "Codex" label blink when truly critical (5hr <= 5%), leaving bar colors to inline `<span>` tags.
 
 **Output**:
-
 ```
-Codex ████░░░░ ████████
+Codex(4) ████████ ████████
 ```
-
 **Tooltip**:
 ```
-5hr window: 0% remaining -- resets 3:38 AM
-Weekly: 54% remaining (15% of week elapsed) -- resets Jul 14 at 2:21 AM
+5hr window: 98% remaining (6% of 5hr elapsed) — resets in 4h
+Weekly: 100% remaining (0% of week elapsed) — resets in 6d 23h
+Rate-limit resets: 4 available
 ```
-
-### openrouterbar
 
 Displays your OpenRouter API key monthly spend.
 
@@ -71,7 +68,7 @@ chmod +x ~/.config/waybar/scripts/*.py
 ## Prerequisites
 
 - **Waybar** built with `json` return-type support (default in most distro packages)
-- **codexbar** CLI installed and authenticated (codexbar only)
+- **Codex** CLI authenticated and logged in (provides `~/.codex/auth.json`)
 - **OpenRouter API key** in `OPENROUTER_API_KEY` environment variable (openrouterbar only)
 
 ## Waybar Configuration
@@ -87,15 +84,15 @@ Add both to your `modules-right` (or wherever you want them):
         "custom/openrouterbar"
     ],
     "custom/codexbar": {
-        "exec": "/usr/bin/python3 $HOME/.config/waybar/scripts/codexbar.py",
+        "exec": "/usr/bin/uv run $HOME/.config/waybar/scripts/codexbar.py",
         "return-type": "json",
-        "interval": 30,
+        "interval": 60,
         "format": "{}",
         "parse": "pango",
         "tooltip": true
     },
     "custom/openrouterbar": {
-        "exec": "/usr/bin/python3 $HOME/.config/waybar/scripts/openrouterbar.py",
+        "exec": "/usr/bin/uv run $HOME/.config/waybar/scripts/openrouterbar.py",
         "return-type": "json",
         "interval": 900,
         "format": "{}",
@@ -104,12 +101,11 @@ Add both to your `modules-right` (or wherever you want them):
     }
 }
 ```
-
 Notes:
 
 - `"parse": "pango"` is required for `<span>` color tags in codexbar.
-- `interval` 30s for codexbar (live feedback), 900s (15 min) for openrouterbar (usage changes slowly).
-- If you use `uv`, replace `exec` with `"/usr/bin/uv run $HOME/.config/waybar/scripts/codexbar.py"`.
+- `interval` 60s for codexbar (matches API rate), 900s (15 min) for openrouterbar (usage changes slowly).
+- Requires Codex CLI to be authenticated (`codex login`) to populate `~/.codex/auth.json`.
 
 ### Environment variables
 

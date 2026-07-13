@@ -4,8 +4,7 @@
 Replaces the old approach that spawned `codex app-server` and used JSON-RPC.
 Now does a single HTTPS GET to `https://chatgpt.com/backend-api/wham/usage`
 using the access token from ~/.codex/auth.json.
-
-5hr bar: colored by remaining %.
+5hr bar: colored by remaining % (shown only when the API reports a 5hr window).
 Weekly bar: colored by scaled consumption — compares used% vs time-elapsed%
 through the week so "ahead of schedule" and "behind schedule" differ even
 at the same remaining %.
@@ -125,7 +124,7 @@ def main():
     auth = load_auth()
     if auth is None:
         print(json.dumps({
-            "text": "Codex(?) <span color=\"#666666\">????????</span> <span color=\"#666666\">????????</span>",
+            "text": "Codex(?) <span color=\"#666666\">????????</span>",
             "tooltip": "Codex usage: unavailable (no auth token in ~/.codex/auth.json)",
             "class": "",
         }))
@@ -135,74 +134,119 @@ def main():
     data = fetch_usage(access_token, account_id)
     if data is None:
         print(json.dumps({
-            "text": "Codex(?) <span color=\"#666666\">????????</span> <span color=\"#666666\">????????</span>",
+            "text": "Codex(?) <span color=\"#666666\">????????</span>",
             "tooltip": "Codex usage: unavailable (API request failed)",
             "class": "",
         }))
         return
 
     rl = data.get("rate_limit", {})
-    primary = rl.get("primary_window", {})
-    secondary = rl.get("secondary_window", {})
+    primary_raw = rl.get("primary_window")
+    secondary_raw = rl.get("secondary_window")
 
-    primary_used = primary.get("used_percent", 0)
-    secondary_used = secondary.get("used_percent", 0)
-    primary_resets_at = primary.get("reset_at", 0)
-    secondary_resets_at = secondary.get("reset_at", 0)
-    primary_window_secs = primary.get("limit_window_seconds", 18000)
-    secondary_window_secs = secondary.get("limit_window_seconds", 604800)
+    # Detect whether primary is actually a 5hr window (limit_window_seconds ≈ 18000)
+    # or was repurposed to a weekly window (as of Codex removing the 5hr window)
+    primary_is_5hr = bool(
+        primary_raw
+        and isinstance(primary_raw, dict)
+        and primary_raw.get("limit_window_seconds") == 18000
+    )
 
-    primary_remaining = 100 - primary_used
-    secondary_remaining = 100 - secondary_used
+    if primary_is_5hr:
+        # Two bars: primary = 5hr, secondary = weekly
+        primary_5hr = primary_raw
+        weekly_raw = secondary_raw if isinstance(secondary_raw, dict) else {}
+    else:
+        # One bar: use the single window that exists (primary or secondary)
+        primary_5hr = None
+        weekly_raw = primary_raw if isinstance(primary_raw, dict) else (secondary_raw if isinstance(secondary_raw, dict) else {})
+
+    weekly_used = weekly_raw.get("used_percent", 0)
+    weekly_resets_at = weekly_raw.get("reset_at", 0)
+    weekly_window_secs = weekly_raw.get("limit_window_seconds", 604800)
+
+    weekly_elapsed_pct = compute_elapsed_pct(weekly_resets_at, weekly_window_secs)
+
+    weekly_remaining = 100 - weekly_used
+    weekly_color = color_remaining(weekly_remaining)
+    weekly_bar = make_bar(weekly_remaining)
+    weekly_desc = human_until(weekly_resets_at)
 
     reset_credits = data.get("rate_limit_reset_credits", {})
     reset_count = reset_credits.get("available_count") if reset_credits else None
     label = f"Codex({reset_count})" if reset_count is not None else "Codex(?)"
 
-    primary_elapsed_pct = compute_elapsed_pct(primary_resets_at, primary_window_secs)
-    secondary_elapsed_pct = compute_elapsed_pct(secondary_resets_at, secondary_window_secs)
+    if primary_5hr:
+        primary_used = primary_5hr.get("used_percent", 0)
+        primary_resets_at = primary_5hr.get("reset_at", 0)
+        primary_window_secs = primary_5hr.get("limit_window_seconds", 18000)
 
-    primary_color = color_remaining(primary_remaining)
-    secondary_color = color_weekly_scaled(secondary_used, secondary_elapsed_pct)
+        primary_remaining = 100 - primary_used
+        primary_elapsed_pct = compute_elapsed_pct(primary_resets_at, primary_window_secs)
+        primary_color = color_remaining(primary_remaining)
+        primary_bar = make_bar(primary_remaining)
+        primary_desc = human_until(primary_resets_at)
 
-    primary_bar = make_bar(primary_remaining)
-    secondary_bar = make_bar(secondary_remaining)
+        # Module class based on primary (5hr is the urgent window)
+        if primary_remaining <= 5:
+            css_class = "critical"
+        elif primary_remaining <= 20:
+            css_class = "warning"
+        else:
+            css_class = ""
 
-    # Module class — blink animation only when truly critical
-    if primary_remaining <= 5:
-        css_class = "critical"
-    elif primary_remaining <= 20:
-        css_class = "warning"
-    else:
-        css_class = ""
-
-    primary_desc = human_until(primary_resets_at)
-    secondary_desc = human_until(secondary_resets_at)
-
-    primary_tooltip = (
-        f"5hr window: {primary_remaining}% remaining "
-        f"({primary_elapsed_pct:.0f}% of 5hr elapsed) — resets {primary_desc}"
-    )
-
-    if secondary_remaining < 0:
-        secondary_tooltip = f"Weekly: exceeded by {-secondary_remaining}% — resets {secondary_desc}"
-    else:
-        secondary_tooltip = (
-            f"Weekly: {secondary_remaining}% remaining "
-            f"({secondary_elapsed_pct:.0f}% of week elapsed) — resets {secondary_desc}"
+        primary_tooltip = (
+            f"5hr window: {primary_remaining}% remaining "
+            f"({primary_elapsed_pct:.0f}% of 5hr elapsed) — resets {primary_desc}"
         )
 
-    tooltip = f"{primary_tooltip}\n{secondary_tooltip}"
+        if weekly_remaining < 0:
+            secondary_tooltip = f"Weekly: exceeded by {-weekly_remaining}% — resets {weekly_desc}"
+        else:
+            secondary_tooltip = (
+                f"Weekly: {weekly_remaining}% remaining "
+                f"({weekly_elapsed_pct:.0f}% of week elapsed) — resets {weekly_desc}"
+            )
+        
+        # weekly bar in two-bar mode uses rate-aware coloring
+        weekly_color = color_weekly_scaled(weekly_used, weekly_elapsed_pct)
 
-    if reset_count is not None:
-        tooltip += f"\nRate-limit resets: {reset_count} available"
+        tooltip = f"{primary_tooltip}\n{secondary_tooltip}"
 
-    print(json.dumps({
-        "text": f"{label} <span color=\"{primary_color}\">{primary_bar}</span>"
-                f" <span color=\"{secondary_color}\">{secondary_bar}</span>",
-        "tooltip": tooltip,
-        "class": css_class,
-    }))
+        if reset_count is not None:
+            tooltip += f"\nRate-limit resets: {reset_count} available"
+
+        print(json.dumps({
+            "text": f"{label} <span color=\"{primary_color}\">{primary_bar}</span>"
+                    f" <span color=\"{weekly_color}\">{weekly_bar}</span>",
+            "tooltip": tooltip,
+            "class": css_class,
+        }))
+    else:
+        # Single bar (weekly only)
+        if weekly_remaining <= 5:
+            css_class = "critical"
+        elif weekly_remaining <= 20:
+            css_class = "warning"
+        else:
+            css_class = ""
+
+        if weekly_remaining < 0:
+            tooltip = f"Weekly: exceeded by {-weekly_remaining}% — resets {weekly_desc}"
+        else:
+            tooltip = (
+                f"Weekly: {weekly_remaining}% remaining "
+                f"({weekly_elapsed_pct:.0f}% of week elapsed) — resets {weekly_desc}"
+            )
+
+        if reset_count is not None:
+            tooltip += f"\nRate-limit resets: {reset_count} available"
+
+        print(json.dumps({
+            "text": f"{label} <span color=\"{weekly_color}\">{weekly_bar}</span>",
+            "tooltip": tooltip,
+            "class": css_class,
+        }))
 
 
 if __name__ == "__main__":

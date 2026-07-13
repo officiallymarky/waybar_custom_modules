@@ -1,6 +1,7 @@
 # Waybar AI Modules
 
-Custom waybar modules for monitoring AI API usage: **Codex** (5hr/weekly quota) and **OpenRouter** (API key monthly spend).
+Custom waybar modules for monitoring AI API usage: **AI Throughput** (vllm/sglang inference rates),
+**Codex** (quota windows) and **OpenRouter** (API key monthly spend).
 
 ## Modules
 
@@ -29,6 +30,41 @@ Codex(4) ████████ ████████
 Weekly: 100% remaining (0% of week elapsed) — resets in 6d 23h
 Rate-limit resets: 4 available
 ```
+
+> **Note**: If the 5-hour window is no longer reported by the API (Codex removed it
+> temporarily or permanently), only the weekly bar is shown.
+>
+> **Weekly-only output:**
+> ```
+> Codex(4) ████████
+> ```
+> Tooltip: `Weekly: 100% remaining (0% of week elapsed) — resets in 6d 23h`
+
+### aithroughput
+
+Displays real-time vllm or sglang inference throughput (prefill & decode tokens/s).
+
+**Dependency**: Python 3 + `requests` package (`pip install requests` or `uv add requests`)
+
+- Polls the backend's Prometheus `/metrics` endpoint.
+- Shows prefill tokens/s and decode tokens/s as `AI P 12345 D 228`.
+- CSS class: `good` (active inference), `idle` (no tokens flowing), `critical` (offline/unreachable).
+- Configuration is passed as CLI flags in the waybar config — no `.env` file needed.
+
+**Output**:
+```
+AI P 12345 D 228
+```
+**Tooltip**:
+```
+AI Throughput
+Prefill: 12345.0 tokens/s
+Decode:  228.0 tokens/s
+Backend: vllm
+Model:   chat
+```
+
+### openrouterbar
 
 Displays your OpenRouter API key monthly spend.
 
@@ -61,7 +97,7 @@ Or copy manually:
 
 ```bash
 mkdir -p ~/.config/waybar/scripts
-cp codexbar.py openrouterbar.py ~/.config/waybar/scripts/
+cp codexbar.py openrouterbar.py aithroughput.py ~/.config/waybar/scripts/
 chmod +x ~/.config/waybar/scripts/*.py
 ```
 
@@ -70,19 +106,29 @@ chmod +x ~/.config/waybar/scripts/*.py
 - **Waybar** built with `json` return-type support (default in most distro packages)
 - **Codex** CLI authenticated and logged in (provides `~/.codex/auth.json`)
 - **OpenRouter API key** in `OPENROUTER_API_KEY` environment variable (openrouterbar only)
+- **Python `requests` package** (aithroughput only): `pip install requests` or `uv add requests`
 
 ## Waybar Configuration
 
 ### `~/.config/waybar/config`
 
-Add both to your `modules-right` (or wherever you want them):
+Add the modules to your `modules-right` (or wherever you want them):
 
 ```json
 {
     "modules-right": [
+        "custom/aithroughput",
         "custom/codexbar",
         "custom/openrouterbar"
     ],
+    "custom/aithroughput": {
+        "exec": "/usr/bin/uv run $HOME/.config/waybar/scripts/aithroughput.py --url http://host:port/metrics --backend vllm --model chat",
+        "return-type": "json",
+        "interval": 1,
+        "format": "{}",
+        "parse": "pango",
+        "tooltip": true
+    },
     "custom/codexbar": {
         "exec": "/usr/bin/uv run $HOME/.config/waybar/scripts/codexbar.py",
         "return-type": "json",
@@ -101,11 +147,12 @@ Add both to your `modules-right` (or wherever you want them):
     }
 }
 ```
+
 Notes:
 
-- `"parse": "pango"` is required for `<span>` color tags in codexbar.
-- `interval` 60s for codexbar (matches API rate), 900s (15 min) for openrouterbar (usage changes slowly).
-- Requires Codex CLI to be authenticated (`codex login`) to populate `~/.codex/auth.json`.
+- Replace `--url`, `--backend`, and `--model` with your actual metrics endpoint and model.
+- `"parse": "pango"` is required for `<span>` color tags.
+- `interval` 1s for aithroughput (real-time throughput), 60s for codexbar, 900s (15 min) for openrouterbar.
 
 ### Environment variables
 
@@ -141,6 +188,23 @@ OPENROUTER_API_KEY=sk-or-v1-...
 Add to `~/.config/waybar/style.css`:
 
 ```css
+/* ── AI Throughput ── */
+#custom-aithroughput {
+    color: #ffffff;
+}
+#custom-aithroughput.warning {
+    color: #f9e2af;
+}
+#custom-aithroughput.good {
+    color: #ffffff;
+}
+#custom-aithroughput.critical {
+    color: #f38ba8;
+}
+#custom-aithroughput.idle {
+    color: #6c7086;
+}
+
 /* ── Codexbar ── */
 #custom-codexbar {
     color: #ffffff;
@@ -179,7 +243,6 @@ Add to `~/.config/waybar/style.css`:
     }
 }
 ```
-
 ## How Weekly Scaling Works (codexbar)
 
 The weekly bar uses **time-scaling** instead of a flat remaining% threshold.

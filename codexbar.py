@@ -11,6 +11,7 @@ at the same remaining %.
 
 Shows available rate-limit resets in the label.
 """
+import base64
 import json
 import os
 import urllib.error
@@ -21,6 +22,82 @@ API_URL = "https://chatgpt.com/backend-api/wham/usage"
 AUTH_FILE = os.path.expanduser("~/.codex/auth.json")
 USER_AGENT = "codexbar/2.0"
 
+
+AUTH0_DOMAIN = "https://auth.openai.com"
+
+
+def refresh_auth() -> tuple[str, str] | None:
+    """Refresh the access_token via the Auth0 refresh_token endpoint.
+
+    Updates ~/.codex/auth.json in place and returns (access_token, account_id).
+    """
+    try:
+        with open(AUTH_FILE) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+    tokens = data.get("tokens", {})
+    refresh_token = tokens.get("refresh_token")
+    id_token = tokens.get("id_token")
+    if not refresh_token or not id_token:
+        return None
+
+    # Decode client_id from the id_token JWT payload (no signature verification needed)
+    try:
+        id_parts = id_token.split(".")
+        if len(id_parts) == 3:
+            padded = id_parts[1] + "=" * (4 - len(id_parts[1]) % 4)
+            id_payload = json.loads(base64.urlsafe_b64decode(padded))
+            client_id = id_payload.get("aud", [])
+            if isinstance(client_id, list):
+                client_id = client_id[0] if client_id else ""
+        else:
+            return None
+    except (ValueError, json.JSONDecodeError):
+        return None
+
+    refresh_payload = json.dumps({
+        "grant_type": "refresh_token",
+        "client_id": client_id,
+        "refresh_token": refresh_token,
+    }).encode()
+
+    req = urllib.request.Request(
+        f"{AUTH0_DOMAIN}/oauth/token",
+        data=refresh_payload,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = json.loads(resp.read().decode())
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError):
+        return None
+
+    new_access_token = body.get("access_token")
+    if not new_access_token:
+        return None
+
+    # Persist new tokens back to the auth file
+    tokens["access_token"] = new_access_token
+    if "id_token" in body:
+        tokens["id_token"] = body["id_token"]
+    if "refresh_token" in body:
+        tokens["refresh_token"] = body["refresh_token"]
+    tokens.setdefault("account_id", data.get("tokens", {}).get("account_id", ""))
+
+    data["last_refresh"] = datetime.now(timezone.utc).isoformat()
+
+    try:
+        with open(AUTH_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except OSError:
+        return None
+
+    acct = tokens.get("account_id", "")
+    return new_access_token, acct
 
 def load_auth() -> tuple[str, str] | None:
     """Read access_token and account_id from ~/.codex/auth.json."""
@@ -132,6 +209,14 @@ def main():
 
     access_token, account_id = auth
     data = fetch_usage(access_token, account_id)
+
+    # Token may be expired — try refreshing and retry once
+    if data is None:
+        refreshed = refresh_auth()
+        if refreshed:
+            access_token, account_id = refreshed
+            data = fetch_usage(access_token, account_id)
+
     if data is None:
         print(json.dumps({
             "text": "Codex(?) <span color=\"#666666\">????????</span>",

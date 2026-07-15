@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 API_URL = "https://chatgpt.com/backend-api/wham/usage"
 AUTH_FILE = os.path.expanduser("~/.codex/auth.json")
 USER_AGENT = "codexbar/2.0"
+FORECAST_API_URL = "https://www.willcodexquotareset.com/api/forecast"
 
 
 AUTH0_DOMAIN = "https://auth.openai.com"
@@ -131,6 +132,30 @@ def fetch_usage(access_token: str, account_id: str) -> dict | None:
         return None
 
 
+def fetch_forecast() -> int | None:
+    """GET the willcodexquotareset forecast API.
+
+    Returns the forecast score (0-100) or None on failure.
+    """
+    req = urllib.request.Request(
+        FORECAST_API_URL,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": USER_AGENT,
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = json.loads(resp.read().decode())
+            score = body.get("forecast", {}).get("score")
+            if isinstance(score, (int, float)):
+                return int(score)
+            return None
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError):
+        return None
+
+
 def make_bar(percentage: int, width: int = 8) -> str:
     """Simple filled/empty block bar."""
     filled = round((percentage / 100) * width)
@@ -166,6 +191,15 @@ def color_weekly_scaled(used_pct: float, elapsed_pct: float) -> str:
     if adjusted >= -15:
         return "#f9e2af"  # on track
     return "#f23645"  # behind schedule
+
+
+def color_forecast_score(score: int) -> str:
+    """Color the willcodexquotareset forecast score by likelihood."""
+    if score >= 50:
+        return "#ff7800"  # orange — notable chance
+    if score >= 25:
+        return "#f9e2af"  # yellow — mild
+    return "#666666"  # gray — quiet
 
 
 def compute_elapsed_pct(resets_at: int, window_seconds: int) -> float:
@@ -261,6 +295,16 @@ def main():
     reset_count = reset_credits.get("available_count") if reset_credits else None
     label = f"Codex({reset_count})" if reset_count is not None else "Codex(?)"
 
+    # Fetch willcodexquotareset forecast score
+    forecast_score = fetch_forecast()
+    if forecast_score is not None:
+        forecast_color = color_forecast_score(forecast_score)
+        forecast_text = f' <span color="{forecast_color}">{forecast_score}%</span>'
+        forecast_tooltip = f"\nReset forecast: {forecast_score}% chance in 48h"
+    else:
+        forecast_text = ""
+        forecast_tooltip = ""
+
     if primary_5hr:
         primary_used = primary_5hr.get("used_percent", 0)
         primary_resets_at = primary_5hr.get("reset_at", 0)
@@ -296,14 +340,15 @@ def main():
         # weekly bar in two-bar mode uses rate-aware coloring
         weekly_color = color_weekly_scaled(weekly_used, weekly_elapsed_pct)
 
-        tooltip = f"{primary_tooltip}\n{secondary_tooltip}"
-
         if reset_count is not None:
             tooltip += f"\nRate-limit resets: {reset_count} available"
 
+        tooltip += forecast_tooltip
+
         print(json.dumps({
             "text": f"{label} <span color=\"{primary_color}\">{primary_bar}</span>"
-                    f" <span color=\"{weekly_color}\">{weekly_bar}</span>",
+                    f" <span color=\"{weekly_color}\">{weekly_bar}</span>"
+                    f"{forecast_text}",
             "tooltip": tooltip,
             "class": css_class,
         }))
@@ -327,8 +372,12 @@ def main():
         if reset_count is not None:
             tooltip += f"\nRate-limit resets: {reset_count} available"
 
+        tooltip += forecast_tooltip
+
+
         print(json.dumps({
-            "text": f"{label} <span color=\"{weekly_color}\">{weekly_bar}</span>",
+            "text": f"{label} <span color=\"{weekly_color}\">{weekly_bar}</span>"
+                    f"{forecast_text}",
             "tooltip": tooltip,
             "class": css_class,
         }))

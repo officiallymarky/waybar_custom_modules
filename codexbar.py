@@ -293,7 +293,7 @@ def main():
 
     reset_credits = data.get("rate_limit_reset_credits", {})
     reset_count = reset_credits.get("available_count") if reset_credits else None
-    label = f"Codex({reset_count})" if reset_count is not None else "Codex(?)"
+    label = f"Codex ({reset_count})" if reset_count is not None else "Codex(?)"
 
     # Fetch willcodexquotareset forecast score
     forecast_score = fetch_forecast()

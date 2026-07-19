@@ -132,10 +132,11 @@ def fetch_usage(access_token: str, account_id: str) -> dict | None:
         return None
 
 
-def fetch_forecast() -> int | None:
+def fetch_forecast() -> tuple[int | None, str | None]:
     """GET the willcodexquotareset forecast API.
 
-    Returns the forecast score (0-100) or None on failure.
+    Returns (score (0-100), error_msg). On success, score is int and error_msg is None.
+    On failure, score is None and error_msg describes the issue.
     """
     req = urllib.request.Request(
         FORECAST_API_URL,
@@ -148,12 +149,21 @@ def fetch_forecast() -> int | None:
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             body = json.loads(resp.read().decode())
+            # API may return {"error": "..."} when unavailable
+            if "error" in body:
+                return None, str(body["error"])
             score = body.get("forecast", {}).get("score")
             if isinstance(score, (int, float)):
-                return int(score)
-            return None
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError):
-        return None
+                return int(score), None
+            return None, "unexpected response shape"
+    except urllib.error.HTTPError as e:
+        return None, f"HTTP {e.code}"
+    except urllib.error.URLError:
+        return None, "network error"
+    except json.JSONDecodeError:
+        return None, "bad JSON"
+    except OSError:
+        return None, "connection failed"
 
 
 def make_bar(percentage: int, width: int = 8) -> str:
@@ -285,7 +295,6 @@ def main():
     weekly_window_secs = weekly_raw.get("limit_window_seconds", 604800)
 
     weekly_elapsed_pct = compute_elapsed_pct(weekly_resets_at, weekly_window_secs)
-
     weekly_remaining = 100 - weekly_used
     weekly_color = color_remaining(weekly_remaining)
     weekly_bar = make_bar(weekly_remaining)
@@ -296,14 +305,18 @@ def main():
     label = f"Codex ({reset_count})" if reset_count is not None else "Codex(?)"
 
     # Fetch willcodexquotareset forecast score
-    forecast_score = fetch_forecast()
+    forecast_score, forecast_err = fetch_forecast()
     if forecast_score is not None:
         forecast_color = color_forecast_score(forecast_score)
         forecast_text = f' <span color="{forecast_color}">{forecast_score}%</span>'
         forecast_tooltip = f"\nReset forecast: {forecast_score}% chance in 48h"
+    elif forecast_err:
+        forecast_text = ""
+        forecast_tooltip = f"\nReset forecast: {forecast_err}"
     else:
         forecast_text = ""
         forecast_tooltip = ""
+
 
     if primary_5hr:
         primary_used = primary_5hr.get("used_percent", 0)

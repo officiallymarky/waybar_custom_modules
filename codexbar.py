@@ -308,7 +308,7 @@ def main():
     forecast_score, forecast_err = fetch_forecast()
     if forecast_score is not None:
         forecast_color = color_forecast_score(forecast_score)
-        forecast_text = f' <span color="{forecast_color}">{forecast_score}%</span>'
+        forecast_text = f' <a href="https://www.willcodexquotareset.com/"><span underline="none" color="{forecast_color}">{forecast_score}%</span></a>'
         forecast_tooltip = f"\nReset forecast: {forecast_score}% chance in 48h"
     elif forecast_err:
         forecast_text = ""

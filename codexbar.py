@@ -353,6 +353,8 @@ def main():
         # weekly bar in two-bar mode uses rate-aware coloring
         weekly_color = color_weekly_scaled(weekly_used, weekly_elapsed_pct)
 
+        tooltip = primary_tooltip + "\n" + secondary_tooltip
+
         if reset_count is not None:
             tooltip += f"\nRate-limit resets: {reset_count} available"
 

@@ -5,9 +5,9 @@ Replaces the old approach that spawned `codex app-server` and used JSON-RPC.
 Now does a single HTTPS GET to `https://chatgpt.com/backend-api/wham/usage`
 using the access token from ~/.codex/auth.json.
 5hr bar: colored by remaining % (shown only when the API reports a 5hr window).
-Weekly bar: colored by scaled consumption — compares used% vs time-elapsed%
-through the week so "ahead of schedule" and "behind schedule" differ even
-at the same remaining %.
+Weekly bar: colored independently by comparing budget used% vs time left%
+through the week — green while used% stays at or below the time left, yellow
+while behind by up to 15 points, red further behind (or nearly exhausted).
 
 Shows available rate-limit resets in the label.
 """
@@ -182,11 +182,12 @@ def color_remaining(remaining_pct: float) -> str:
 
 
 def color_weekly_scaled(used_pct: float, elapsed_pct: float) -> str:
-    """Color the weekly bar by comparing consumption rate vs time elapsed.
+    """Color the weekly bar by comparing budget used vs time left.
 
-    `adjusted = elapsed_pct - used_pct`:
-      positive -> more time elapsed than budget used (ahead of schedule)
-      negative -> more budget used than time elapsed (behind schedule)
+    `margin = time_left - used_pct`:
+      positive -> more time left in the window than budget consumed (ahead)
+      zero     -> exactly on pace
+      negative -> more budget consumed than time left (behind schedule)
     """
     remaining = 100 - used_pct
 
@@ -194,13 +195,14 @@ def color_weekly_scaled(used_pct: float, elapsed_pct: float) -> str:
     if remaining <= 10:
         return "#f23645"
 
-    adjusted = elapsed_pct - used_pct
+    time_left = 100 - elapsed_pct
+    margin = time_left - used_pct
 
-    if adjusted >= 15:
-        return "#089981"  # comfortably ahead
-    if adjusted >= -15:
-        return "#f9e2af"  # on track
-    return "#f23645"  # behind schedule
+    if margin >= 0:
+        return "#089981"  # ahead of, or exactly on, schedule
+    if margin >= -15:
+        return "#f9e2af"  # behind by up to 15 points
+    return "#f23645"  # well behind schedule
 
 
 def color_forecast_score(score: int) -> str:
@@ -295,8 +297,9 @@ def main():
     weekly_window_secs = weekly_raw.get("limit_window_seconds", 604800)
 
     weekly_elapsed_pct = compute_elapsed_pct(weekly_resets_at, weekly_window_secs)
+    weekly_time_left = 100 - weekly_elapsed_pct
     weekly_remaining = 100 - weekly_used
-    weekly_color = color_remaining(weekly_remaining)
+    weekly_color = color_weekly_scaled(weekly_used, weekly_elapsed_pct)
     weekly_bar = make_bar(weekly_remaining)
     weekly_desc = human_until(weekly_resets_at)
 
@@ -342,21 +345,20 @@ def main():
         else:
             css_class = ""
 
+        primary_time_left = 100 - primary_elapsed_pct
         primary_tooltip = (
-            f"5hr window: {primary_remaining}% remaining "
-            f"({primary_elapsed_pct:.0f}% of 5hr elapsed) — resets {primary_desc}"
+            f"5hr window: {primary_remaining:.0f}% remaining "
+            f"({primary_time_left:.0f}% of 5hr left) — resets {primary_desc}"
         )
 
         if weekly_remaining < 0:
-            secondary_tooltip = f"Weekly: exceeded by {-weekly_remaining}% — resets {weekly_desc}"
+            secondary_tooltip = f"Weekly: exceeded by {-weekly_remaining:.0f}% — resets {weekly_desc}"
         else:
             secondary_tooltip = (
-                f"Weekly: {weekly_remaining}% remaining "
-                f"({weekly_elapsed_pct:.0f}% of week elapsed) — resets {weekly_desc}"
+                f"Weekly: {weekly_remaining:.0f}% remaining "
+                f"({weekly_time_left:.0f}% of week left) — resets {weekly_desc}"
             )
-        
-        # weekly bar in two-bar mode uses rate-aware coloring
-        weekly_color = color_weekly_scaled(weekly_used, weekly_elapsed_pct)
+
 
         tooltip = primary_tooltip + "\n" + secondary_tooltip
 
@@ -382,11 +384,11 @@ def main():
             css_class = ""
 
         if weekly_remaining < 0:
-            tooltip = f"Weekly: exceeded by {-weekly_remaining}% — resets {weekly_desc}"
+            tooltip = f"Weekly: exceeded by {-weekly_remaining:.0f}% — resets {weekly_desc}"
         else:
             tooltip = (
-                f"Weekly: {weekly_remaining}% remaining "
-                f"({weekly_elapsed_pct:.0f}% of week elapsed) — resets {weekly_desc}"
+                f"Weekly: {weekly_remaining:.0f}% remaining "
+                f"({weekly_time_left:.0f}% of week left) — resets {weekly_desc}"
             )
 
         if reset_count is not None:

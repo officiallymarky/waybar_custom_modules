@@ -16,7 +16,7 @@ Displays your Codex 5-hour and weekly usage windows as block bars with independe
 | Bar | Logic |
 |---|---|
 | 5hr | Simple remaining%: green >= 60%, yellow >= 30%, red < 30% |
-| Weekly | **Scaled** -- compares `used%` vs `time-elapsed%` through the week. Green if comfortably ahead of schedule (+15 pts), yellow if on track, red if behind schedule or <= 10% remaining regardless. A 46% usage at 15% of the week is red (behind); the same 46% at 70% of the week is green (ahead, conserving). |
+| Weekly | Compares budget `used%` vs `time left%` in the window: green while used <= time left, yellow when behind by up to 15 pts, red further behind (or <= 10% remaining regardless). 40% used halfway through the week is green (ahead); 70% used at the same point is red (will run out). |
 
 The module CSS class (`critical`/`warning`/`""`) only controls the "Codex" label blink when truly critical (5hr <= 5%), leaving bar colors to inline `<span>` tags.
 
@@ -26,8 +26,8 @@ Codex(4) ████████ ████████
 ```
 **Tooltip**:
 ```
-5hr window: 98% remaining (6% of 5hr elapsed) — resets in 4h
-Weekly: 100% remaining (0% of week elapsed) — resets in 6d 23h
+5hr window: 98% remaining (94% of 5hr left) — resets in 4h
+Weekly: 100% remaining (100% of week left) — resets in 6d 23h
 Rate-limit resets: 4 available
 ```
 
@@ -38,7 +38,7 @@ Rate-limit resets: 4 available
 > ```
 > Codex(4) ████████
 > ```
-> Tooltip: `Weekly: 100% remaining (0% of week elapsed) — resets in 6d 23h`
+> Tooltip: `Weekly: 100% remaining (100% of week left) — resets in 6d 23h`
 
 ### aithroughput
 
@@ -243,19 +243,24 @@ Add to `~/.config/waybar/style.css`:
     }
 }
 ```
-## How Weekly Scaling Works (codexbar)
+## How Weekly Coloring Works (codexbar)
 
-The weekly bar uses **time-scaling** instead of a flat remaining% threshold.
+The weekly bar compares **budget used** against **time left** in the window,
+instead of a flat remaining% threshold, and is fully independent of the 5hr bar.
 
 At any point in the week, calculate:
 
 ```
-elapsed_pct  = time_since_reset / window_duration * 100
-adjusted     = elapsed_pct - used_pct
+time_left  = 100 - time_elapsed_pct
+margin     = time_left - used_pct
 ```
 
-If `adjusted >= +15`: **ahead of schedule** (green) -- conserving budget well.
-If `adjusted >= -15`: **on track** (yellow) -- consumption matches time elapsed.
-If `adjusted < -15`: **behind schedule** (red) -- burning budget faster than time passes.
+If `margin >= 0`: **green** -- at or ahead of schedule (more time left than budget consumed).
+If `margin >= -15`: **yellow** -- up to 15 pts behind schedule.
+If `margin < -15`: **red** -- burning budget faster than time remains.
+Always **red** when <= 10% of the weekly budget remains, regardless of schedule.
 
-This prevents false alarms early in the week. Example: 46% used at 15% of the week is behind schedule (correct -- you'll run out), but 46% used at 70% of the week means you saved most of your budget for the final stretch (green).
+Examples: 40% used halfway through the week is green (50% time left vs 40% used);
+60% used at the same point is yellow; 70% used is red. The same used% can sit in
+different colors at different points of the week, but the weekly bar never reacts
+to 5hr-window state -- only to its own budget and its own clock.

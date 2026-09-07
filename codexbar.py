@@ -17,6 +17,7 @@ import os
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from html import escape
 
 API_URL = "https://chatgpt.com/backend-api/wham/usage"
 AUTH_FILE = os.path.expanduser("~/.codex/auth.json")
@@ -371,7 +372,7 @@ def main():
             "text": f"{label} <span color=\"{primary_color}\">{primary_bar}</span>"
                     f" <span color=\"{weekly_color}\">{weekly_bar}</span>"
                     f"{forecast_text}",
-            "tooltip": tooltip,
+            "tooltip": escape(tooltip),
             "class": css_class,
         }))
     else:
@@ -400,7 +401,7 @@ def main():
         print(json.dumps({
             "text": f"{label} <span color=\"{weekly_color}\">{weekly_bar}</span>"
                     f"{forecast_text}",
-            "tooltip": tooltip,
+            "tooltip": escape(tooltip),
             "class": css_class,
         }))
 

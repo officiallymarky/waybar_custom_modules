@@ -1,7 +1,7 @@
 # Waybar AI Modules
 
 Custom waybar modules for monitoring AI API usage: **AI Throughput** (vllm/sglang inference rates),
-**Codex** (quota windows) and **OpenRouter** (API key monthly spend).
+**Codex** (quota windows), **Command Code** (credit windows) and **OpenRouter** (API key monthly spend).
 
 ## Modules
 
@@ -39,6 +39,44 @@ Rate-limit resets: 4 available
 > Codex(4) ████████
 > ```
 > Tooltip: `Weekly: 100% remaining (100% of week left) — resets in 6d 23h`
+
+### commandcodebar
+
+Displays your Command Code 5-hour and weekly credit windows as block bars with independent, time-aware coloring.
+
+**Dependency**: Python 3 stdlib only (no pip packages). Calls the Command Code API directly.
+
+**How it colors each bar**:
+
+| Bar | Logic |
+|---|---|
+| 5hr | Simple remaining% of the window cap: green >= 60%, yellow >= 30%, red < 30% |
+| Weekly | Compares budget `used%` vs `time left%` in the window: green while used <= time left, yellow when behind by up to 15 pts, red further behind (or <= 10% remaining regardless). Same rule as codexbar, so the two modules read alike at a glance. |
+
+The module CSS class (`critical`/`warning`/`""`) tracks the most urgent window — the 5hr window when the API reports one, otherwise the weekly window — leaving bar colors to inline `<span>` tags.
+
+**Output**:
+```
+CmdCode ███████░ ████████
+```
+**Tooltip**:
+```
+Command Code usage
+Plan: GOAT — renews in 29d
+5hr window: 91% remaining (94% of 5hr left) — resets in 4h
+Weekly: 96% remaining (100% of week left) — resets in 6d 23h
+Monthly: 68.68 of 70.00 credits left (2% used)
+```
+
+Extra pay-as-you-go credits are never capped by the rolling windows, so when any are present two more tooltip lines appear:
+```
+Extra credits: 12.50 purchased, 3.25 free
+Total available: 84.85
+```
+
+> **Note**: On plans with no rolling windows (pay-as-you-go / Provider), the module shows a single bar for the monthly credit balance instead, and the tooltip labels it `Monthly`.
+
+> **Note**: The monthly allowance comes from the plan id reported by `/alpha/billing/subscriptions` (`individual-goat`, `individual-pro`, `individual-max`, …). An unrecognized plan id still renders, but the monthly line drops the allowance and shows the raw balance. If bonus credits push the balance above the plan allowance, the line reports them explicitly, e.g. `Monthly: 80.00 credits left (70.00 plan + 10.00 bonus)`.
 
 ### aithroughput
 
@@ -97,7 +135,7 @@ Or copy manually:
 
 ```bash
 mkdir -p ~/.config/waybar/scripts
-cp codexbar.py openrouterbar.py aithroughput.py ~/.config/waybar/scripts/
+cp codexbar.py commandcodebar.py openrouterbar.py aithroughput.py ~/.config/waybar/scripts/
 chmod +x ~/.config/waybar/scripts/*.py
 ```
 
@@ -105,6 +143,7 @@ chmod +x ~/.config/waybar/scripts/*.py
 
 - **Waybar** built with `json` return-type support (default in most distro packages)
 - **Codex** CLI authenticated and logged in (provides `~/.codex/auth.json`)
+- **Command Code** API key in the `COMMAND_CODE_API_KEY` environment variable (commandcodebar only)
 - **OpenRouter API key** in `OPENROUTER_API_KEY` environment variable (openrouterbar only)
 - **Python `requests` package** (aithroughput only): `pip install requests` or `uv add requests`
 
@@ -119,6 +158,7 @@ Add the modules to your `modules-right` (or wherever you want them):
     "modules-right": [
         "custom/aithroughput",
         "custom/codexbar",
+        "custom/commandcodebar",
         "custom/openrouterbar"
     ],
     "custom/aithroughput": {
@@ -131,6 +171,14 @@ Add the modules to your `modules-right` (or wherever you want them):
     },
     "custom/codexbar": {
         "exec": "/usr/bin/uv run $HOME/.config/waybar/scripts/codexbar.py",
+        "return-type": "json",
+        "interval": 60,
+        "format": "{}",
+        "parse": "pango",
+        "tooltip": true
+    },
+    "custom/commandcodebar": {
+        "exec": "/usr/bin/uv run $HOME/.config/waybar/scripts/commandcodebar.py",
         "return-type": "json",
         "interval": 60,
         "format": "{}",
@@ -152,19 +200,26 @@ Notes:
 
 - Replace `--url`, `--backend`, and `--model` with your actual metrics endpoint and model.
 - `"parse": "pango"` is required for `<span>` color tags.
-- `interval` 1s for aithroughput (real-time throughput), 60s for codexbar, 900s (15 min) for openrouterbar.
+- `interval` 1s for aithroughput (real-time throughput), 60s for codexbar and commandcodebar, 900s (15 min) for openrouterbar.
 
 ### Environment variables
 
-Waybar does not read shell init files (`.bashrc`, `.profile`, `.zshrc`).
+**commandcodebar** and **openrouterbar** both read their key from the
+environment (`COMMAND_CODE_API_KEY`, `OPENROUTER_API_KEY`).
 
-Create a config in
+Waybar does not read shell init files (`.bashrc`, `.profile`, `.zshrc`), so an
+`export` in your shell is not enough — create a config in
 [environment.d](https://wiki.archlinux.org/title/Environment_variables#Using_environment.d)
 to make the variable available to every process in your session:
 
 ```ini
 # ~/.config/environment.d/openrouter.conf
 OPENROUTER_API_KEY=sk-or-v1-...
+```
+
+```ini
+# ~/.config/environment.d/commandcode.conf
+COMMAND_CODE_API_KEY=user_...
 ```
 
 This works in KDE Plasma (systemd session mode), Sway/Hyprland launched via
@@ -175,6 +230,7 @@ session.  If your compositor launches waybar outside systemd (e.g. bare
 ```ini
 # ~/.config/waybar/.env
 OPENROUTER_API_KEY=sk-or-v1-...
+COMMAND_CODE_API_KEY=user_...
 ```
 
 ```json
@@ -183,6 +239,19 @@ OPENROUTER_API_KEY=sk-or-v1-...
     ...
 }
 ```
+
+`environment.d` is read when the systemd user session starts, so a file added
+mid-session needs the variable handed to the running manager and the bar
+restarted before it takes effect:
+
+```bash
+systemctl --user import-environment COMMAND_CODE_API_KEY
+killall waybar            # waybar can leave stale instances behind
+systemctl --user reset-failed waybar
+systemctl --user start waybar
+pgrep -c -x waybar        # expect 1
+```
+
 ## Styling
 
 Add to `~/.config/waybar/style.css`:
@@ -221,6 +290,22 @@ Add to `~/.config/waybar/style.css`:
     color: #f9e2af;
 }
 
+/* ── Command Code ── */
+#custom-commandcodebar {
+    color: #ffffff;
+}
+#custom-commandcodebar.critical {
+    color: #f23645;
+    animation-name: blink;
+    animation-duration: 1s;
+    animation-timing-function: linear;
+    animation-iteration-count: infinite;
+    animation-direction: alternate;
+}
+#custom-commandcodebar.warning {
+    color: #f9e2af;
+}
+
 /* ── OpenRouter ── */
 #custom-openrouterbar {
     color: #ffffff;
@@ -243,7 +328,9 @@ Add to `~/.config/waybar/style.css`:
     }
 }
 ```
-## How Weekly Coloring Works (codexbar)
+## How Weekly Coloring Works (codexbar and commandcodebar)
+
+Both weekly bars share one rule, so the two modules read alike at a glance.
 
 The weekly bar compares **budget used** against **time left** in the window,
 instead of a flat remaining% threshold, and is fully independent of the 5hr bar.

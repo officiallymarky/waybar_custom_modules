@@ -122,7 +122,7 @@ def read_setting(env: dict, key: str) -> str:
     return os.environ.get(key) or env.get(key, "")
 
 
-def fetch_sglang(url: str, prev: dict | None, now: float) -> dict | None:
+def fetch_sglang(url: str, model: str, prev: dict | None, now: float) -> dict | None:
     """Fetch sglang metrics and compute throughput."""
     try:
         resp = requests.get(url, timeout=2)
@@ -160,7 +160,7 @@ def fetch_sglang(url: str, prev: dict | None, now: float) -> dict | None:
 
         # Fallback: try gen_throughput gauge if decode is zero
         if decode_value == 0.0:
-            gauge_metric = 'sglang:gen_throughput{engine_type="unified",model_name="chat"}'
+            gauge_metric = f'sglang:gen_throughput{{engine_type="unified",model_name="{model}"}}'
             gauge_value = metrics.get(gauge_metric, 0.0)
             if gauge_value > 0:
                 decode_value = gauge_value
@@ -253,7 +253,7 @@ def main() -> None:
         if backend == "vllm":
             result = fetch_vllm(url, model, prev, now)
         elif backend == "sglang":
-            result = fetch_sglang(url, prev, now)
+            result = fetch_sglang(url, model, prev, now)
         else:
             raise RuntimeError(f"Unknown backend: {backend}")
 

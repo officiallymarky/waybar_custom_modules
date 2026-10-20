@@ -5,7 +5,7 @@
 
 """Waybar custom module for AI inference throughput (prefill/decode t/s).
 
-Supports sglang and vllm backends.
+Supports vllm, sglang and Flare backends.
 
 Configuration (in priority order):
   1. CLI flags: --url, --backend, --model
@@ -14,7 +14,7 @@ Configuration (in priority order):
   3. .env file in the script directory (legacy)
 
 Usage:
-  aithroughput.py --url http://host:port/metrics --backend vllm --model chat
+  aithroughput.py --url http://host:port/metrics --backend flare
 """
 
 import argparse
@@ -176,10 +176,51 @@ def fetch_sglang(url: str, model: str, prev: dict | None, now: float) -> dict | 
         return None
 
 
+def fetch_flare(url: str, prev: dict | None, now: float) -> dict | None:
+    """Fetch Flare metrics and compute throughput."""
+    try:
+        resp = requests.get(url, timeout=2)
+        if resp.status_code != 200:
+            return None
+
+        metrics = {}
+        for line in resp.text.splitlines():
+            if line.startswith("#") or not line:
+                continue
+            parts = line.rsplit(" ", 1)
+            if len(parts) == 2:
+                try:
+                    metrics[parts[0]] = float(parts[1])
+                except ValueError:
+                    pass
+
+        decode_tokens = metrics.get("flare_generated_tokens_total", 0.0)
+        prefill_tokens = metrics.get("flare_prefill_tokens_total", 0.0)
+
+        if prev is None:
+            return None
+
+        dt = now - prev["time"]
+        if dt <= 0:
+            return None
+
+        return {
+            "prefill": max((prefill_tokens - prev["prefill"]) / dt, 0.0),
+            "decode": max((decode_tokens - prev["decode"]) / dt, 0.0),
+            "raw_decode": decode_tokens,
+            "raw_prefill": prefill_tokens,
+            "time": now,
+        }
+    except (requests.RequestException, KeyError, TypeError, ValueError):
+        return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="AI inference throughput module")
     parser.add_argument("--url", help="Metrics endpoint URL")
-    parser.add_argument("--backend", choices=["sglang", "vllm"], help="Backend type")
+    parser.add_argument(
+        "--backend", choices=["sglang", "vllm", "flare"], help="Backend type"
+    )
     parser.add_argument("--model", help="Model name (required for vllm backend)")
     args = parser.parse_args()
 
@@ -207,6 +248,8 @@ def main() -> None:
 
     now = time.time()
     prev = load_cache()
+    if prev is not None and prev.get("backend") != backend:
+        prev = None
 
     try:
         if prev is None:
@@ -238,10 +281,20 @@ def main() -> None:
                         raw_decode = value
                     elif 'realtime_tokens_total' in key and 'mode="prefill_compute"' in key:
                         raw_prefill = value
+            elif backend == "flare":
+                raw_decode = raw_metrics.get("flare_generated_tokens_total", 0.0)
+                raw_prefill = raw_metrics.get("flare_prefill_tokens_total", 0.0)
             else:
                 raise RuntimeError(f"Unknown backend: {backend}")
 
-            save_cache({"decode": raw_decode, "prefill": raw_prefill, "time": now})
+            save_cache(
+                {
+                    "decode": raw_decode,
+                    "prefill": raw_prefill,
+                    "time": now,
+                    "backend": backend,
+                }
+            )
             print(json.dumps({
                 "text": "<span color=\"#89b4fa\">AI</span> <span color=\"#6c7086\">warming up</span>",
                 "class": "idle",
@@ -254,17 +307,22 @@ def main() -> None:
             result = fetch_vllm(url, model, prev, now)
         elif backend == "sglang":
             result = fetch_sglang(url, model, prev, now)
+        elif backend == "flare":
+            result = fetch_flare(url, prev, now)
         else:
             raise RuntimeError(f"Unknown backend: {backend}")
 
         if result is None:
             raise RuntimeError(f"{backend} fetch returned None")
 
-        save_cache({
-            "decode": result.get("raw_decode", result["decode"]),
-            "prefill": result.get("raw_prefill", result["prefill"]),
-            "time": now,
-        })
+        save_cache(
+            {
+                "decode": result.get("raw_decode", result["decode"]),
+                "prefill": result.get("raw_prefill", result["prefill"]),
+                "time": now,
+                "backend": backend,
+            }
+        )
 
     except Exception as exc:
         if prev is not None:
@@ -294,18 +352,24 @@ def main() -> None:
         f'<span color="#fab387">P {format_rate(prefill, 5)}</span> '
         f'<span color="#a6e3a1">D {format_rate(decode, 3)}</span>'
     )
+    tooltip_lines = [
+        "AI Throughput",
+        f"Prefill: {prefill:.1f} tokens/s",
+        f"Decode:  {decode:.1f} tokens/s",
+        f"Backend: {backend}",
+    ]
+    if model:
+        tooltip_lines.append(f"Model:   {model}")
 
-    print(json.dumps({
-        "text": text,
-        "tooltip": (
-            f"AI Throughput\n"
-            f"Prefill: {prefill:.1f} tokens/s\n"
-            f"Decode:  {decode:.1f} tokens/s\n"
-            f"Backend: {backend}\n"
-            f"Model:   {model}"
-        ),
-        "class": color_class,
-    }))
+    print(
+        json.dumps(
+            {
+                "text": text,
+                "tooltip": "\n".join(tooltip_lines),
+                "class": color_class,
+            }
+        )
+    )
 
 
 if __name__ == "__main__":

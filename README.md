@@ -1,6 +1,6 @@
 # Waybar AI Modules
 
-Custom waybar modules for monitoring AI API usage: **AI Throughput** (vllm/sglang inference rates),
+Custom waybar modules for monitoring AI API usage: **AI Throughput** (vllm/sglang/Flare inference rates),
 **Codex** (quota windows), **Command Code** (credit windows) and **OpenRouter** (API key monthly spend).
 
 ## Modules
@@ -80,11 +80,12 @@ Total available: 84.85
 
 ### aithroughput
 
-Displays real-time vllm or sglang inference throughput (prefill & decode tokens/s).
+Displays real-time vllm, sglang or Flare inference throughput (prefill & decode tokens/s).
 
 **Dependency**: Python 3 + `requests` package (`pip install requests` or `uv add requests`)
 
 - Polls the backend's Prometheus `/metrics` endpoint.
+- Flare derives rates from `flare_prefill_tokens_total` and `flare_generated_tokens_total` counter deltas.
 - Shows prefill tokens/s and decode tokens/s as `AI P 12345 D 228`.
 - CSS class: `good` (active inference), `idle` (no tokens flowing), `critical` (offline/unreachable).
 - Configuration is passed as CLI flags in the waybar config — no `.env` file needed.

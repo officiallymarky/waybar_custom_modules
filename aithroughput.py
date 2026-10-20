@@ -5,7 +5,10 @@
 
 """Waybar custom module for AI inference throughput (prefill/decode t/s).
 
-Supports vllm, sglang and Flare backends.
+Supports vllm, sglang and Flare backends. With --backend auto the backend is
+detected from the first /metrics response and cached alongside the sample
+cache, so later polls reuse it instead of probing again. Delete
+/tmp/aithroughput_cache.json to force a new detection.
 
 Configuration (in priority order):
   1. CLI flags: --url, --backend, --model
@@ -14,7 +17,7 @@ Configuration (in priority order):
   3. .env file in the script directory (legacy)
 
 Usage:
-  aithroughput.py --url http://host:port/metrics --backend flare
+  aithroughput.py --url http://host:port/metrics --backend auto
 """
 
 import argparse
@@ -29,6 +32,8 @@ import requests
 SCRIPT_DIR = Path(__file__).parent
 ENV_FILE = SCRIPT_DIR / ".env"
 CACHE_FILE = Path("/tmp/aithroughput_cache.json")
+
+BACKENDS = ("vllm", "sglang", "flare")
 
 
 def format_rate(value: float, width: int) -> str:
@@ -49,52 +54,96 @@ def load_env() -> dict:
     return env
 
 
-def fetch_vllm(url: str, model: str, prev: dict | None, now: float) -> dict | None:
-    """Fetch vllm metrics and compute throughput."""
-    try:
-        resp = requests.get(url, timeout=2)
-        if resp.status_code != 200:
-            return None
+def parse_metrics(text: str) -> dict[str, float]:
+    """Parse Prometheus text exposition into metric name -> value."""
+    metrics = {}
+    for line in text.splitlines():
+        if line.startswith("#") or not line:
+            continue
+        parts = line.rsplit(" ", 1)
+        if len(parts) == 2:
+            try:
+                metrics[parts[0]] = float(parts[1])
+            except ValueError:
+                pass
+    return metrics
 
-        metrics = {}
-        for line in resp.text.splitlines():
-            if line.startswith("#") or not line:
-                continue
-            parts = line.rsplit(" ", 1)
-            if len(parts) == 2:
-                try:
-                    metrics[parts[0]] = float(parts[1])
-                except ValueError:
-                    pass
 
+def fetch_metrics(url: str) -> dict[str, float]:
+    resp = requests.get(url, timeout=2)
+    if resp.status_code != 200:
+        raise RuntimeError(f"HTTP {resp.status_code} from {url}")
+    return parse_metrics(resp.text)
+
+
+def detect_backend(metrics: dict[str, float]) -> str | None:
+    """Identify the backend from its metric names."""
+    if any(name.startswith("flare_") for name in metrics):
+        return "flare"
+    if any(name.startswith("vllm:") for name in metrics):
+        return "vllm"
+    if any(name.startswith("sglang:") for name in metrics) or any(
+        "realtime_tokens_total" in name for name in metrics
+    ):
+        return "sglang"
+    return None
+
+
+def baseline_counters(
+    metrics: dict[str, float], backend: str, model: str
+) -> tuple[float, float]:
+    """Return (prefill, decode) counter totals for the first sample."""
+    if backend == "vllm":
         gen_metric = f'vllm:generation_tokens_total{{engine="0",model_name="{model}"}}'
         prompt_metric = f'vllm:prompt_tokens_total{{engine="0",model_name="{model}"}}'
-        gen_tokens = metrics.get(gen_metric, 0.0)
-        prompt_tokens = metrics.get(prompt_metric, 0.0)
+        return metrics.get(prompt_metric, 0.0), metrics.get(gen_metric, 0.0)
+    if backend == "sglang":
+        decode = 0.0
+        prefill = 0.0
+        for key, value in metrics.items():
+            if "realtime_tokens_total" in key and 'mode="decode"' in key:
+                decode = value
+            elif "realtime_tokens_total" in key and 'mode="prefill_compute"' in key:
+                prefill = value
+        return prefill, decode
+    if backend == "flare":
+        return (
+            metrics.get("flare_prefill_tokens_total", 0.0),
+            metrics.get("flare_generated_tokens_total", 0.0),
+        )
+    raise RuntimeError(f"Unknown backend: {backend}")
 
-        if prev is None:
-            return None  # need a baseline
 
-        dt = now - prev["time"]
-        if dt <= 0:
-            return None
+def fetch_vllm(
+    metrics: dict[str, float], model: str, prev: dict | None, now: float
+) -> dict | None:
+    """Compute vllm throughput from parsed metrics."""
+    gen_metric = f'vllm:generation_tokens_total{{engine="0",model_name="{model}"}}'
+    prompt_metric = f'vllm:prompt_tokens_total{{engine="0",model_name="{model}"}}'
+    gen_tokens = metrics.get(gen_metric, 0.0)
+    prompt_tokens = metrics.get(prompt_metric, 0.0)
 
-        if prev.get("raw_decode") is not None and prev.get("raw_prefill") is not None:
-            decode_delta = gen_tokens - prev["raw_decode"]
-            prefill_delta = prompt_tokens - prev["raw_prefill"]
-        else:
-            decode_delta = gen_tokens - prev["decode"]
-            prefill_delta = prompt_tokens - prev["prefill"]
+    if prev is None:
+        return None  # need a baseline
 
-        return {
-            "prefill": max(prefill_delta / dt, 0.0),
-            "decode": max(decode_delta / dt, 0.0),
-            "raw_decode": gen_tokens,
-            "raw_prefill": prompt_tokens,
-            "time": now,
-        }
-    except Exception:
+    dt = now - prev["time"]
+    if dt <= 0:
         return None
+
+    if prev.get("raw_decode") is not None and prev.get("raw_prefill") is not None:
+        decode_delta = gen_tokens - prev["raw_decode"]
+        prefill_delta = prompt_tokens - prev["raw_prefill"]
+    else:
+        decode_delta = gen_tokens - prev["decode"]
+        prefill_delta = prompt_tokens - prev["prefill"]
+
+    return {
+        "prefill": max(prefill_delta / dt, 0.0),
+        "decode": max(decode_delta / dt, 0.0),
+        "raw_decode": gen_tokens,
+        "raw_prefill": prompt_tokens,
+        "time": now,
+    }
 
 
 def load_cache() -> dict | None:
@@ -122,96 +171,90 @@ def read_setting(env: dict, key: str) -> str:
     return os.environ.get(key) or env.get(key, "")
 
 
-def fetch_sglang(url: str, model: str, prev: dict | None, now: float) -> dict | None:
-    """Fetch sglang metrics and compute throughput."""
-    try:
-        resp = requests.get(url, timeout=2)
-        if resp.status_code != 200:
-            return None
+def fetch_sglang(
+    metrics: dict[str, float], model: str, prev: dict | None, now: float
+) -> dict | None:
+    """Compute sglang throughput from parsed metrics."""
+    decode_tokens = 0.0
+    prefill_tokens = 0.0
+    for key, value in metrics.items():
+        if "realtime_tokens_total" in key and 'mode="decode"' in key:
+            decode_tokens = value
+        elif "realtime_tokens_total" in key and 'mode="prefill_compute"' in key:
+            prefill_tokens = value
 
-        metrics = {}
-        for line in resp.text.splitlines():
-            if line.startswith("#") or not line:
-                continue
-            parts = line.rsplit(" ", 1)
-            if len(parts) == 2:
-                try:
-                    metrics[parts[0]] = float(parts[1])
-                except ValueError:
-                    pass
+    if prev is None:
+        return None  # need a baseline
 
-        decode_tokens = 0.0
-        prefill_tokens = 0.0
-        for key, value in metrics.items():
-            if 'realtime_tokens_total' in key and 'mode="decode"' in key:
-                decode_tokens = value
-            elif 'realtime_tokens_total' in key and 'mode="prefill_compute"' in key:
-                prefill_tokens = value
-
-        if prev is None:
-            return None  # need a baseline
-
-        dt = now - prev["time"]
-        if dt <= 0:
-            return None
-
-        decode_value = max((decode_tokens - prev["decode"]) / dt, 0.0)
-        prefill_value = max((prefill_tokens - prev["prefill"]) / dt, 0.0)
-
-        # Fallback: try gen_throughput gauge if decode is zero
-        if decode_value == 0.0:
-            gauge_metric = f'sglang:gen_throughput{{engine_type="unified",model_name="{model}"}}'
-            gauge_value = metrics.get(gauge_metric, 0.0)
-            if gauge_value > 0:
-                decode_value = gauge_value
-
-        return {
-            "prefill": prefill_value,
-            "decode": decode_value,
-            "raw_decode": decode_tokens,
-            "raw_prefill": prefill_tokens,
-            "time": now,
-        }
-    except Exception:
+    dt = now - prev["time"]
+    if dt <= 0:
         return None
 
+    decode_value = max((decode_tokens - prev["decode"]) / dt, 0.0)
+    prefill_value = max((prefill_tokens - prev["prefill"]) / dt, 0.0)
 
-def fetch_flare(url: str, prev: dict | None, now: float) -> dict | None:
-    """Fetch Flare metrics and compute throughput."""
+    # Fallback: try gen_throughput gauge if decode is zero
+    if decode_value == 0.0:
+        gauge_metric = f'sglang:gen_throughput{{engine_type="unified",model_name="{model}"}}'
+        gauge_value = metrics.get(gauge_metric, 0.0)
+        if gauge_value > 0:
+            decode_value = gauge_value
+
+    return {
+        "prefill": prefill_value,
+        "decode": decode_value,
+        "raw_decode": decode_tokens,
+        "raw_prefill": prefill_tokens,
+        "time": now,
+    }
+
+
+def fetch_flare(
+    metrics: dict[str, float], prev: dict | None, now: float
+) -> dict | None:
+    """Compute Flare throughput from parsed metrics."""
+    decode_tokens = metrics.get("flare_generated_tokens_total", 0.0)
+    prefill_tokens = metrics.get("flare_prefill_tokens_total", 0.0)
+
+    if prev is None:
+        return None
+
+    dt = now - prev["time"]
+    if dt <= 0:
+        return None
+
+    return {
+        "prefill": max((prefill_tokens - prev["prefill"]) / dt, 0.0),
+        "decode": max((decode_tokens - prev["decode"]) / dt, 0.0),
+        "raw_decode": decode_tokens,
+        "raw_prefill": prefill_tokens,
+        "time": now,
+    }
+
+
+def emit_unavailable(exc: Exception, prev: dict | None) -> None:
+    """Render an offline state, or warming up when there is no baseline."""
+    tooltip = escape(str(exc))
+    if prev is not None:
+        print(json.dumps({
+            "text": "<span color=\"#f38ba8\">AI offline</span>",
+            "class": "critical",
+            "tooltip": tooltip,
+        }))
+    else:
+        print(json.dumps({
+            "text": "<span color=\"#89b4fa\">AI</span> <span color=\"#6c7086\">warming up</span>",
+            "class": "idle",
+            "tooltip": tooltip,
+        }))
+
+
+def try_fetch(url: str, prev: dict | None) -> dict[str, float] | None:
+    """Fetch metrics, rendering the failure state instead of raising."""
     try:
-        resp = requests.get(url, timeout=2)
-        if resp.status_code != 200:
-            return None
-
-        metrics = {}
-        for line in resp.text.splitlines():
-            if line.startswith("#") or not line:
-                continue
-            parts = line.rsplit(" ", 1)
-            if len(parts) == 2:
-                try:
-                    metrics[parts[0]] = float(parts[1])
-                except ValueError:
-                    pass
-
-        decode_tokens = metrics.get("flare_generated_tokens_total", 0.0)
-        prefill_tokens = metrics.get("flare_prefill_tokens_total", 0.0)
-
-        if prev is None:
-            return None
-
-        dt = now - prev["time"]
-        if dt <= 0:
-            return None
-
-        return {
-            "prefill": max((prefill_tokens - prev["prefill"]) / dt, 0.0),
-            "decode": max((decode_tokens - prev["decode"]) / dt, 0.0),
-            "raw_decode": decode_tokens,
-            "raw_prefill": prefill_tokens,
-            "time": now,
-        }
-    except (requests.RequestException, KeyError, TypeError, ValueError):
+        return fetch_metrics(url)
+    except (requests.RequestException, RuntimeError) as exc:
+        emit_unavailable(exc, prev)
         return None
 
 
@@ -219,7 +262,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="AI inference throughput module")
     parser.add_argument("--url", help="Metrics endpoint URL")
     parser.add_argument(
-        "--backend", choices=["sglang", "vllm", "flare"], help="Backend type"
+        "--backend",
+        choices=[*BACKENDS, "auto"],
+        help="Backend type (auto detects it from /metrics once)",
     )
     parser.add_argument("--model", help="Model name (required for vllm backend)")
     args = parser.parse_args()
@@ -238,6 +283,55 @@ def main() -> None:
         }))
         return
 
+    now = time.time()
+    prev = load_cache()
+    if prev is not None and prev.get("url") not in (None, url):
+        prev = None
+
+    metrics: dict[str, float] | None = None
+
+    if backend == "auto":
+        cached_backend = None
+        if (
+            prev is not None
+            and prev.get("url") == url
+            and prev.get("backend") in BACKENDS
+        ):
+            cached_backend = prev["backend"]
+
+        if cached_backend is not None:
+            backend = cached_backend
+        else:
+            metrics = try_fetch(url, prev)
+            if metrics is None:
+                return
+
+            detected = detect_backend(metrics)
+            if detected is None:
+                print(json.dumps({
+                    "text": "<span color=\"#f38ba8\">AI config</span>",
+                    "class": "critical",
+                    "tooltip": escape(
+                        f"Could not detect backend from {url}: "
+                        "no vllm, sglang or Flare metrics"
+                    ),
+                }))
+                return
+
+            backend = detected
+            prev = None  # establish a fresh baseline
+
+    if backend not in BACKENDS:
+        print(json.dumps({
+            "text": "<span color=\"#f38ba8\">AI config</span>",
+            "class": "critical",
+            "tooltip": escape(f"Unknown backend: {backend}"),
+        }))
+        return
+
+    if prev is not None and prev.get("backend") != backend:
+        prev = None
+
     if backend == "vllm" and not model:
         print(json.dumps({
             "text": "<span color=\"#f38ba8\">AI config</span>",
@@ -246,98 +340,58 @@ def main() -> None:
         }))
         return
 
-    now = time.time()
-    prev = load_cache()
-    if prev is not None and prev.get("backend") != backend:
-        prev = None
+    if prev is None:
+        # First run: fetch raw counters, save baseline, show warmup
+        if metrics is None:
+            metrics = try_fetch(url, prev)
+            if metrics is None:
+                return
 
-    try:
-        if prev is None:
-            # First run: fetch raw counters, save baseline, show warmup
-            resp = requests.get(url, timeout=2)
-            if resp.status_code != 200:
-                raise RuntimeError("non-200 on first fetch")
-            raw_metrics = {}
-            for line in resp.text.splitlines():
-                if line.startswith("#") or not line:
-                    continue
-                parts = line.rsplit(" ", 1)
-                if len(parts) == 2:
-                    try:
-                        raw_metrics[parts[0]] = float(parts[1])
-                    except ValueError:
-                        pass
-
-            if backend == "vllm":
-                gen_metric = f'vllm:generation_tokens_total{{engine="0",model_name="{model}"}}'
-                prompt_metric = f'vllm:prompt_tokens_total{{engine="0",model_name="{model}"}}'
-                raw_decode = raw_metrics.get(gen_metric, 0.0)
-                raw_prefill = raw_metrics.get(prompt_metric, 0.0)
-            elif backend == "sglang":
-                raw_decode = 0.0
-                raw_prefill = 0.0
-                for key, value in raw_metrics.items():
-                    if 'realtime_tokens_total' in key and 'mode="decode"' in key:
-                        raw_decode = value
-                    elif 'realtime_tokens_total' in key and 'mode="prefill_compute"' in key:
-                        raw_prefill = value
-            elif backend == "flare":
-                raw_decode = raw_metrics.get("flare_generated_tokens_total", 0.0)
-                raw_prefill = raw_metrics.get("flare_prefill_tokens_total", 0.0)
-            else:
-                raise RuntimeError(f"Unknown backend: {backend}")
-
-            save_cache(
-                {
-                    "decode": raw_decode,
-                    "prefill": raw_prefill,
-                    "time": now,
-                    "backend": backend,
-                }
-            )
-            print(json.dumps({
-                "text": "<span color=\"#89b4fa\">AI</span> <span color=\"#6c7086\">warming up</span>",
-                "class": "idle",
-                "tooltip": f"Collecting first sample...\n{backend} @ {url}",
-            }))
-            return
-
-        # Subsequent runs: delegate to backend-specific fetcher
-        if backend == "vllm":
-            result = fetch_vllm(url, model, prev, now)
-        elif backend == "sglang":
-            result = fetch_sglang(url, model, prev, now)
-        elif backend == "flare":
-            result = fetch_flare(url, prev, now)
-        else:
-            raise RuntimeError(f"Unknown backend: {backend}")
-
-        if result is None:
-            raise RuntimeError(f"{backend} fetch returned None")
-
+        raw_prefill, raw_decode = baseline_counters(metrics, backend, model)
         save_cache(
             {
-                "decode": result.get("raw_decode", result["decode"]),
-                "prefill": result.get("raw_prefill", result["prefill"]),
+                "decode": raw_decode,
+                "prefill": raw_prefill,
                 "time": now,
                 "backend": backend,
+                "url": url,
             }
         )
-
-    except Exception as exc:
-        if prev is not None:
-            print(json.dumps({
-                "text": "<span color=\"#f38ba8\">AI offline</span>",
-                "class": "critical",
-                "tooltip": escape(str(exc)),
-            }))
-        else:
-            print(json.dumps({
-                "text": "<span color=\"#89b4fa\">AI</span> <span color=\"#6c7086\">warming up</span>",
-                "class": "idle",
-                "tooltip": escape(str(exc)),
-            }))
+        print(json.dumps({
+            "text": "<span color=\"#89b4fa\">AI</span> <span color=\"#6c7086\">warming up</span>",
+            "class": "idle",
+            "tooltip": f"Collecting first sample...\n{backend} @ {url}",
+        }))
         return
+
+    # Subsequent runs: fetch metrics and compute rates
+    if metrics is None:
+        metrics = try_fetch(url, prev)
+        if metrics is None:
+            return
+
+    if backend == "vllm":
+        result = fetch_vllm(metrics, model, prev, now)
+    elif backend == "sglang":
+        result = fetch_sglang(metrics, model, prev, now)
+    elif backend == "flare":
+        result = fetch_flare(metrics, prev, now)
+    else:
+        result = None
+
+    if result is None:
+        emit_unavailable(RuntimeError(f"{backend} fetch returned no sample"), prev)
+        return
+
+    save_cache(
+        {
+            "decode": result.get("raw_decode", result["decode"]),
+            "prefill": result.get("raw_prefill", result["prefill"]),
+            "time": now,
+            "backend": backend,
+            "url": url,
+        }
+    )
 
     prefill = result["prefill"]
     decode = result["decode"]

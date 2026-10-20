@@ -33,6 +33,21 @@ class MetricsResponse:
         )
 
 
+class VllmResponse:
+    status_code = 200
+
+    def __init__(self, prefill: int, generated: int) -> None:
+        self.text = (
+            f'vllm:prompt_tokens_total{{engine="0",model_name="chat"}} {prefill}\n'
+            f'vllm:generation_tokens_total{{engine="0",model_name="chat"}} {generated}\n'
+        )
+
+
+class PlainResponse:
+    status_code = 200
+    text = "some_unrelated_metric 1\n"
+
+
 class FlareCliTests(unittest.TestCase):
     def test_cli_reports_flare_prefill_and_decode_rates(self) -> None:
         module = load_module()
@@ -82,6 +97,167 @@ class FlareCliTests(unittest.TestCase):
         self.assertNotIn("Model:", output[1]["tooltip"])
         self.assertEqual(output[1]["class"], "good")
 
+
+
+class AutoBackendTests(unittest.TestCase):
+    def run_module(
+        self,
+        module: ModuleType,
+        argv: list[str],
+        cache_file: Path,
+        responses: list[object],
+        times: list[float],
+    ) -> tuple[list[dict], object]:
+        output: list[dict] = []
+        with (
+            patch.object(module, "CACHE_FILE", cache_file),
+            patch.object(module, "load_env", return_value={}),
+            patch.object(module.requests, "get", side_effect=responses) as get,
+            patch.object(module.time, "time", side_effect=times),
+            patch.object(sys, "argv", argv),
+        ):
+            for _ in times:
+                stdout = io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                    module.main()
+                output.append(json.loads(stdout.getvalue()))
+        return output, get
+
+    def test_auto_detects_backend_on_first_run_and_reuses_it(self) -> None:
+        module = load_module()
+        argv = [
+            str(MODULE_PATH),
+            "--url",
+            "http://127.0.0.1:8000/metrics",
+            "--backend",
+            "auto",
+        ]
+        responses = [MetricsResponse(1000, 2000), MetricsResponse(1080, 2030)]
+
+        with tempfile.TemporaryDirectory() as directory:
+            cache_file = Path(directory) / "cache.json"
+            output, get = self.run_module(
+                module, argv, cache_file, responses, [100.0, 102.0]
+            )
+
+            self.assertEqual(get.call_count, 2)
+            self.assertIn("warming up", output[0]["text"])
+            self.assertIn("flare @ http://127.0.0.1:8000/metrics", output[0]["tooltip"])
+            self.assertEqual(
+                output[1]["text"],
+                '<span color="#89b4fa">AI</span> <span color="#fab387">P 00040</span> <span color="#a6e3a1">D 015</span>',
+            )
+            self.assertIn("Backend: flare", output[1]["tooltip"])
+            cache = json.loads(cache_file.read_text())
+            self.assertEqual(cache["backend"], "flare")
+            self.assertEqual(cache["url"], "http://127.0.0.1:8000/metrics")
+
+    def test_auto_redetects_when_url_changes(self) -> None:
+        module = load_module()
+        argv = [
+            str(MODULE_PATH),
+            "--url",
+            "http://127.0.0.1:9000/metrics",
+            "--backend",
+            "auto",
+            "--model",
+            "chat",
+        ]
+
+        with tempfile.TemporaryDirectory() as directory:
+            cache_file = Path(directory) / "cache.json"
+            cache_file.write_text(
+                json.dumps(
+                    {
+                        "decode": 2000,
+                        "prefill": 1000,
+                        "time": 99.0,
+                        "backend": "flare",
+                        "url": "http://127.0.0.1:8000/metrics",
+                    }
+                )
+            )
+            output, get = self.run_module(
+                module, argv, cache_file, [VllmResponse(500, 700)], [100.0]
+            )
+
+            self.assertEqual(get.call_count, 1)
+            self.assertIn("warming up", output[0]["text"])
+            self.assertIn("vllm @ http://127.0.0.1:9000/metrics", output[0]["tooltip"])
+            cache = json.loads(cache_file.read_text())
+            self.assertEqual(cache["backend"], "vllm")
+            self.assertEqual(cache["url"], "http://127.0.0.1:9000/metrics")
+
+    def test_explicit_backend_resets_baseline_when_url_changes(self) -> None:
+        module = load_module()
+        argv = [
+            str(MODULE_PATH),
+            "--url",
+            "http://127.0.0.1:9000/metrics",
+            "--backend",
+            "flare",
+        ]
+
+        with tempfile.TemporaryDirectory() as directory:
+            cache_file = Path(directory) / "cache.json"
+            cache_file.write_text(
+                json.dumps(
+                    {
+                        "decode": 2000,
+                        "prefill": 1000,
+                        "time": 99.0,
+                        "backend": "flare",
+                        "url": "http://127.0.0.1:8000/metrics",
+                    }
+                )
+            )
+            output, get = self.run_module(
+                module, argv, cache_file, [MetricsResponse(5000, 9000)], [100.0]
+            )
+
+            self.assertEqual(get.call_count, 1)
+            self.assertIn("warming up", output[0]["text"])
+            self.assertIn("flare @ http://127.0.0.1:9000/metrics", output[0]["tooltip"])
+            cache = json.loads(cache_file.read_text())
+            self.assertEqual(cache["decode"], 9000)
+            self.assertEqual(cache["prefill"], 5000)
+            self.assertEqual(cache["url"], "http://127.0.0.1:9000/metrics")
+
+    def test_auto_reports_unrecognized_metrics(self) -> None:
+        module = load_module()
+        argv = [
+            str(MODULE_PATH),
+            "--url",
+            "http://127.0.0.1:8000/metrics",
+            "--backend",
+            "auto",
+        ]
+
+        with tempfile.TemporaryDirectory() as directory:
+            cache_file = Path(directory) / "cache.json"
+            output, get = self.run_module(
+                module, argv, cache_file, [PlainResponse()], [100.0]
+            )
+
+            self.assertEqual(get.call_count, 1)
+            self.assertEqual(output[0]["class"], "critical")
+            self.assertIn("AI config", output[0]["text"])
+            self.assertIn("Could not detect backend", output[0]["tooltip"])
+            self.assertFalse(cache_file.exists())
+
+    def test_detect_backend_identifies_each_flavor(self) -> None:
+        module = load_module()
+        cases = {
+            "flare": "flare_prefill_tokens_total 1\nflare_generated_tokens_total 2\n",
+            "vllm": 'vllm:prompt_tokens_total{engine="0",model_name="chat"} 1\n',
+            "sglang": 'sglang:realtime_tokens_total{mode="decode"} 1\n',
+        }
+        for expected, text in cases.items():
+            with self.subTest(expected):
+                self.assertEqual(
+                    module.detect_backend(module.parse_metrics(text)), expected
+                )
+        self.assertIsNone(module.detect_backend(module.parse_metrics("x 1\n")))
 
 if __name__ == "__main__":
     unittest.main()

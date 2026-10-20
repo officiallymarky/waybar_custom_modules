@@ -80,12 +80,13 @@ Total available: 84.85
 
 ### aithroughput
 
-Displays real-time vllm, sglang or Flare inference throughput (prefill & decode tokens/s).
+Displays real-time vllm, sglang or Flare inference throughput (prefill & decode tokens/s), with optional automatic backend detection.
 
 **Dependency**: Python 3 + `requests` package (`pip install requests` or `uv add requests`)
 
 - Polls the backend's Prometheus `/metrics` endpoint.
 - Flare derives rates from `flare_prefill_tokens_total` and `flare_generated_tokens_total` counter deltas.
+- `--backend auto` detects vllm, sglang or Flare from the first `/metrics` response and caches the choice in `/tmp/aithroughput_cache.json`; later polls reuse it instead of probing again. Delete that file to force re-detection (the vllm backend still requires `--model`).
 - Shows prefill tokens/s and decode tokens/s as `AI P 12345 D 228`.
 - CSS class: `good` (active inference), `idle` (no tokens flowing), `critical` (offline/unreachable).
 - Configuration is passed as CLI flags in the waybar config — no `.env` file needed.
@@ -163,7 +164,7 @@ Add the modules to your `modules-right` (or wherever you want them):
         "custom/openrouterbar"
     ],
     "custom/aithroughput": {
-        "exec": "/usr/bin/uv run $HOME/.config/waybar/scripts/aithroughput.py --url http://host:port/metrics --backend vllm --model chat",
+        "exec": "/usr/bin/uv run $HOME/.config/waybar/scripts/aithroughput.py --url http://host:port/metrics --backend auto",
         "return-type": "json",
         "interval": 1,
         "format": "{}",
@@ -199,7 +200,7 @@ Add the modules to your `modules-right` (or wherever you want them):
 
 Notes:
 
-- Replace `--url`, `--backend`, and `--model` with your actual metrics endpoint and model.
+- Replace `--url` with your metrics endpoint. `--backend auto` detects vllm, sglang or Flare from the first `/metrics` response and caches the choice; add `--model <name>` when the detected backend is vllm.
 - `"parse": "pango"` is required for `<span>` color tags.
 - `interval` 1s for aithroughput (real-time throughput), 60s for codexbar and commandcodebar, 900s (15 min) for openrouterbar.
 

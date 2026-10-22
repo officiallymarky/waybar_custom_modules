@@ -36,10 +36,10 @@ class MetricsResponse:
 class VllmResponse:
     status_code = 200
 
-    def __init__(self, prefill: int, generated: int) -> None:
+    def __init__(self, prefill: int, generated: int, model: str = "chat") -> None:
         self.text = (
-            f'vllm:prompt_tokens_total{{engine="0",model_name="chat"}} {prefill}\n'
-            f'vllm:generation_tokens_total{{engine="0",model_name="chat"}} {generated}\n'
+            f'vllm:prompt_tokens_total{{engine="0",model_name="{model}"}} {prefill}\n'
+            f'vllm:generation_tokens_total{{engine="0",model_name="{model}"}} {generated}\n'
         )
 
 
@@ -98,7 +98,6 @@ class FlareCliTests(unittest.TestCase):
         self.assertEqual(output[1]["class"], "good")
 
 
-
 class AutoBackendTests(unittest.TestCase):
     def run_module(
         self,
@@ -123,7 +122,7 @@ class AutoBackendTests(unittest.TestCase):
                 output.append(json.loads(stdout.getvalue()))
         return output, get
 
-    def test_auto_detects_backend_on_first_run_and_reuses_it(self) -> None:
+    def test_auto_preserves_baseline_for_same_backend(self) -> None:
         module = load_module()
         argv = [
             str(MODULE_PATH),
@@ -245,6 +244,87 @@ class AutoBackendTests(unittest.TestCase):
             self.assertIn("Could not detect backend", output[0]["tooltip"])
             self.assertFalse(cache_file.exists())
 
+    def test_auto_switches_backends_without_model_configuration(self) -> None:
+        module = load_module()
+        argv = [
+            str(MODULE_PATH),
+            "--url",
+            "http://localhost/metrics",
+            "--backend",
+            "auto",
+        ]
+        responses = [
+            MetricsResponse(100, 10),
+            VllmResponse(1000, 100),
+            VllmResponse(1200, 140),
+            MetricsResponse(200, 30),
+            MetricsResponse(260, 50),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            output, _ = self.run_module(
+                module,
+                argv,
+                Path(directory) / "cache.json",
+                responses,
+                [1.0, 3.0, 5.0, 7.0, 9.0],
+            )
+        self.assertIn("warming up", output[1]["text"])
+        self.assertIn("Prefill: 100.0 tokens/s", output[2]["tooltip"])
+        self.assertIn("Decode:  20.0 tokens/s", output[2]["tooltip"])
+        self.assertIn("Model:   chat", output[2]["tooltip"])
+        self.assertIn("warming up", output[3]["text"])
+        self.assertIn("Decode:  10.0 tokens/s", output[4]["tooltip"])
+        self.assertIn("Backend: flare", output[4]["tooltip"])
+
+    def test_auto_model_change_resets_baseline(self) -> None:
+        module = load_module()
+        argv = [
+            str(MODULE_PATH),
+            "--url",
+            "http://localhost/metrics",
+            "--backend",
+            "auto",
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            output, _ = self.run_module(
+                module,
+                argv,
+                Path(directory) / "cache.json",
+                [
+                    VllmResponse(1000, 100),
+                    VllmResponse(5000, 500, "other"),
+                    VllmResponse(5100, 530, "other"),
+                ],
+                [1.0, 3.0, 5.0],
+            )
+        self.assertIn("warming up", output[1]["text"])
+        self.assertIn("Decode:  15.0 tokens/s", output[2]["tooltip"])
+        self.assertIn("Model:   other", output[2]["tooltip"])
+
+    def test_multiple_models_require_explicit_selection(self) -> None:
+        module = load_module()
+        argv = [
+            str(MODULE_PATH),
+            "--url",
+            "http://localhost/metrics",
+            "--backend",
+            "auto",
+        ]
+        first = VllmResponse(1000, 100)
+        first.text += VllmResponse(5000, 500, "other").text
+        second = VllmResponse(1200, 140)
+        second.text += VllmResponse(9000, 900, "other").text
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "cache.json"
+            output, _ = self.run_module(module, argv, cache, [first], [1.0])
+            self.assertEqual(output[0]["class"], "critical")
+            self.assertFalse(cache.exists())
+            output, _ = self.run_module(
+                module, [*argv, "--model", "chat"], cache, [first, second], [3.0, 5.0]
+            )
+        self.assertIn("warming up", output[0]["text"])
+        self.assertIn("Decode:  20.0 tokens/s", output[1]["tooltip"])
+
     def test_detect_backend_identifies_each_flavor(self) -> None:
         module = load_module()
         cases = {
@@ -258,6 +338,7 @@ class AutoBackendTests(unittest.TestCase):
                     module.detect_backend(module.parse_metrics(text)), expected
                 )
         self.assertIsNone(module.detect_backend(module.parse_metrics("x 1\n")))
+
 
 if __name__ == "__main__":
     unittest.main()

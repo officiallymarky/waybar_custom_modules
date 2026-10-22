@@ -6,9 +6,9 @@
 """Waybar custom module for AI inference throughput (prefill/decode t/s).
 
 Supports vllm, sglang and Flare backends. With --backend auto the backend is
-detected from the first /metrics response and cached alongside the sample
-cache, so later polls reuse it instead of probing again. Delete
-/tmp/aithroughput_cache.json to force a new detection.
+detected from every /metrics response. Backend or vllm model changes establish
+a fresh counter baseline. If --model is omitted, vllm uses the sole advertised
+model; multiple models require explicit selection.
 
 Configuration (in priority order):
   1. CLI flags: --url, --backend, --model
@@ -23,6 +23,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import time
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -195,7 +196,9 @@ def fetch_sglang(
 
     # Fallback: try gen_throughput gauge if decode is zero
     if decode_value == 0.0:
-        gauge_metric = f'sglang:gen_throughput{{engine_type="unified",model_name="{model}"}}'
+        gauge_metric = (
+            f'sglang:gen_throughput{{engine_type="unified",model_name="{model}"}}'
+        )
         gauge_value = metrics.get(gauge_metric, 0.0)
         if gauge_value > 0:
             decode_value = gauge_value
@@ -236,17 +239,25 @@ def emit_unavailable(exc: Exception, prev: dict | None) -> None:
     """Render an offline state, or warming up when there is no baseline."""
     tooltip = escape(str(exc))
     if prev is not None:
-        print(json.dumps({
-            "text": "<span color=\"#f38ba8\">AI offline</span>",
-            "class": "critical",
-            "tooltip": tooltip,
-        }))
+        print(
+            json.dumps(
+                {
+                    "text": '<span color="#f38ba8">AI offline</span>',
+                    "class": "critical",
+                    "tooltip": tooltip,
+                }
+            )
+        )
     else:
-        print(json.dumps({
-            "text": "<span color=\"#89b4fa\">AI</span> <span color=\"#6c7086\">warming up</span>",
-            "class": "idle",
-            "tooltip": tooltip,
-        }))
+        print(
+            json.dumps(
+                {
+                    "text": '<span color="#89b4fa">AI</span> <span color="#6c7086">warming up</span>',
+                    "class": "idle",
+                    "tooltip": tooltip,
+                }
+            )
+        )
 
 
 def try_fetch(url: str, prev: dict | None) -> dict[str, float] | None:
@@ -264,9 +275,9 @@ def main() -> None:
     parser.add_argument(
         "--backend",
         choices=[*BACKENDS, "auto"],
-        help="Backend type (auto detects it from /metrics once)",
+        help="Backend type (auto detects it from each /metrics response)",
     )
-    parser.add_argument("--model", help="Model name (required for vllm backend)")
+    parser.add_argument("--model", help="Model name (inferred for single-model vllm)")
     args = parser.parse_args()
 
     env = load_env()
@@ -276,11 +287,15 @@ def main() -> None:
     model = args.model or read_setting(env, "AI_THROUGHPUT_MODEL")
 
     if not url or not backend:
-        print(json.dumps({
-            "text": "<span color=\"#f38ba8\">AI config</span>",
-            "class": "critical",
-            "tooltip": "Pass --url and --backend flags, or set AI_THROUGHPUT_URL and AI_THROUGHPUT_BACKEND",
-        }))
+        print(
+            json.dumps(
+                {
+                    "text": '<span color="#f38ba8">AI config</span>',
+                    "class": "critical",
+                    "tooltip": "Pass --url and --backend flags, or set AI_THROUGHPUT_URL and AI_THROUGHPUT_BACKEND",
+                }
+            )
+        )
         return
 
     now = time.time()
@@ -288,64 +303,73 @@ def main() -> None:
     if prev is not None and prev.get("url") not in (None, url):
         prev = None
 
-    metrics: dict[str, float] | None = None
+    metrics = try_fetch(url, prev)
+    if metrics is None:
+        return
 
     if backend == "auto":
-        cached_backend = None
-        if (
-            prev is not None
-            and prev.get("url") == url
-            and prev.get("backend") in BACKENDS
-        ):
-            cached_backend = prev["backend"]
-
-        if cached_backend is not None:
-            backend = cached_backend
-        else:
-            metrics = try_fetch(url, prev)
-            if metrics is None:
-                return
-
-            detected = detect_backend(metrics)
-            if detected is None:
-                print(json.dumps({
-                    "text": "<span color=\"#f38ba8\">AI config</span>",
-                    "class": "critical",
-                    "tooltip": escape(
-                        f"Could not detect backend from {url}: "
-                        "no vllm, sglang or Flare metrics"
-                    ),
-                }))
-                return
-
-            backend = detected
-            prev = None  # establish a fresh baseline
+        detected = detect_backend(metrics)
+        if detected is None:
+            print(
+                json.dumps(
+                    {
+                        "text": '<span color="#f38ba8">AI config</span>',
+                        "class": "critical",
+                        "tooltip": escape(
+                            f"Could not detect backend from {url}: "
+                            "no vllm, sglang or Flare metrics"
+                        ),
+                    }
+                )
+            )
+            return
+        backend = detected
 
     if backend not in BACKENDS:
-        print(json.dumps({
-            "text": "<span color=\"#f38ba8\">AI config</span>",
-            "class": "critical",
-            "tooltip": escape(f"Unknown backend: {backend}"),
-        }))
+        print(
+            json.dumps(
+                {
+                    "text": '<span color="#f38ba8">AI config</span>',
+                    "class": "critical",
+                    "tooltip": escape(f"Unknown backend: {backend}"),
+                }
+            )
+        )
         return
 
     if prev is not None and prev.get("backend") != backend:
         prev = None
 
-    if backend == "vllm" and not model:
-        print(json.dumps({
-            "text": "<span color=\"#f38ba8\">AI config</span>",
-            "class": "critical",
-            "tooltip": "Pass --model or set AI_THROUGHPUT_MODEL for vllm backend",
-        }))
-        return
+    if backend == "vllm":
+        if not model:
+            models = {
+                json.loads(match.group(1))
+                for name in metrics
+                if name.startswith(
+                    ("vllm:generation_tokens_total{", "vllm:prompt_tokens_total{")
+                )
+                for match in re.finditer(
+                    r'(?:\{|,)model_name=("(?:\\.|[^"\\])*")', name
+                )
+            }
+            if len(models) != 1:
+                print(
+                    json.dumps(
+                        {
+                            "text": '<span color="#f38ba8">AI config</span>',
+                            "class": "critical",
+                            "tooltip": "Cannot infer a unique vllm model; pass --model "
+                            "or set AI_THROUGHPUT_MODEL",
+                        }
+                    )
+                )
+                return
+            model = models.pop()
+        if prev is not None and prev.get("model") != model:
+            prev = None
 
     if prev is None:
-        # First run: fetch raw counters, save baseline, show warmup
-        if metrics is None:
-            metrics = try_fetch(url, prev)
-            if metrics is None:
-                return
+        # First run: save raw counters as the baseline, show warmup
 
         raw_prefill, raw_decode = baseline_counters(metrics, backend, model)
         save_cache(
@@ -355,20 +379,21 @@ def main() -> None:
                 "time": now,
                 "backend": backend,
                 "url": url,
+                "model": model,
             }
         )
-        print(json.dumps({
-            "text": "<span color=\"#89b4fa\">AI</span> <span color=\"#6c7086\">warming up</span>",
-            "class": "idle",
-            "tooltip": f"Collecting first sample...\n{backend} @ {url}",
-        }))
+        print(
+            json.dumps(
+                {
+                    "text": '<span color="#89b4fa">AI</span> <span color="#6c7086">warming up</span>',
+                    "class": "idle",
+                    "tooltip": f"Collecting first sample...\n{backend} @ {url}",
+                }
+            )
+        )
         return
 
-    # Subsequent runs: fetch metrics and compute rates
-    if metrics is None:
-        metrics = try_fetch(url, prev)
-        if metrics is None:
-            return
+    # Subsequent runs: compute rates from the fetched metrics
 
     if backend == "vllm":
         result = fetch_vllm(metrics, model, prev, now)
@@ -390,6 +415,7 @@ def main() -> None:
             "time": now,
             "backend": backend,
             "url": url,
+            "model": model,
         }
     )
 

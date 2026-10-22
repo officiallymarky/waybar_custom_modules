@@ -86,7 +86,7 @@ Displays real-time vllm, sglang or Flare inference throughput (prefill & decode 
 
 - Polls the backend's Prometheus `/metrics` endpoint.
 - Flare derives rates from `flare_prefill_tokens_total` and `flare_generated_tokens_total` counter deltas.
-- `--backend auto` detects vllm, sglang or Flare from the first `/metrics` response and caches the choice in `/tmp/aithroughput_cache.json`; later polls reuse it instead of probing again. Delete that file to force re-detection (the vllm backend still requires `--model`).
+- `--backend auto` detects vllm, sglang or Flare from every `/metrics` response. Switching backends resets the counter baseline for one poll, then throughput resumes automatically. For vllm, the sole advertised model is selected automatically; multiple models require `--model <name>`. Changing the selected vllm model also resets the baseline.
 - Shows prefill tokens/s and decode tokens/s as `AI P 12345 D 228`.
 - CSS class: `good` (active inference), `idle` (no tokens flowing), `critical` (offline/unreachable).
 - Configuration is passed as CLI flags in the waybar config — no `.env` file needed.
@@ -200,7 +200,7 @@ Add the modules to your `modules-right` (or wherever you want them):
 
 Notes:
 
-- Replace `--url` with your metrics endpoint. `--backend auto` detects vllm, sglang or Flare from the first `/metrics` response and caches the choice; add `--model <name>` when the detected backend is vllm.
+- Replace `--url` with your metrics endpoint. `--backend auto` follows backend changes automatically; `--model <name>` is optional for single-model vllm servers and required when multiple models are advertised.
 - `"parse": "pango"` is required for `<span>` color tags.
 - `interval` 1s for aithroughput (real-time throughput), 60s for codexbar and commandcodebar, 900s (15 min) for openrouterbar.
 
